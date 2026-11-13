@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MapContainer, TileLayer, CircleMarker, Circle, Popup, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
+import { QUICK_FOODS, matchFood, searchTerms } from './foodSearch'
 
 const DAEGU_CENTER = [35.8714, 128.6014]
 const RADIUS_OPTIONS = [300, 500, 1000]
@@ -28,9 +29,22 @@ function FlyTo({ target }) {
   return null
 }
 
+// 검색 결과가 모두 보이도록 지도 범위 조정
+function FitResults({ points, trigger }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!trigger || points.length === 0) return
+    if (points.length === 1) map.flyTo(points[0], 16, { duration: 0.6 })
+    else map.flyToBounds(points, { padding: [40, 40], maxZoom: 16, duration: 0.6 })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trigger, map])
+  return null
+}
+
 function App() {
   const [data, setData] = useState(null)
   const [district, setDistrict] = useState('')
+  const [query, setQuery] = useState('')
   const [onlyFreeParking, setOnlyFreeParking] = useState(false)
   const [selected, setSelected] = useState(null)
   const [radius, setRadius] = useState(500)
@@ -70,13 +84,29 @@ function App() {
     () => [...new Set(items.map((r) => r.district).filter(Boolean))].sort(),
     [items],
   )
+  // 음식 검색 (식당 이름 + 등록 메뉴)
+  const terms = useMemo(() => searchTerms(query), [query])
+  const matches = useMemo(() => {
+    const m = new Map()
+    if (terms.length) for (const r of items) {
+      const hit = matchFood(r, terms)
+      if (hit) m.set(r.id, hit)
+    }
+    return m
+  }, [items, terms])
+
   const shown = useMemo(
     () =>
       items.filter(
-        (r) => (!district || r.district === district) && (!onlyFreeParking || r.freeParkingCount > 0),
+        (r) =>
+          (!district || r.district === district) &&
+          (!onlyFreeParking || r.freeParkingCount > 0) &&
+          (!terms.length || matches.has(r.id)),
       ),
-    [items, district, onlyFreeParking],
+    [items, district, onlyFreeParking, terms, matches],
   )
+  const fitKey = terms.length ? `${query}|${district}|${onlyFreeParking}|${shown.length}` : ''
+  const fitPoints = useMemo(() => shown.map((r) => [r.lat, r.lng]), [shown])
   const freeCount = useMemo(
     () => items.filter((r) => (!district || r.district === district) && r.freeParkingCount > 0).length,
     [items, district],
@@ -102,6 +132,7 @@ function App() {
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
         <FlyTo target={flyTarget} />
+        <FitResults points={fitPoints} trigger={selected ? '' : fitKey} />
 
         {/* 안심식당 */}
         {shown.map((r) =>
@@ -120,6 +151,7 @@ function App() {
             >
               <Tooltip direction="top" offset={[0, -6]}>
                 🍽 {r.name}
+                {r.menu && ` · ${r.menu}`}
                 {r.freeParkingCount > 0 && ' · 🅿 무료주차 근처'}
               </Tooltip>
             </CircleMarker>
@@ -171,6 +203,27 @@ function App() {
       <aside className="panel">
         <h1>대구 안심식당 · 주변 주차장</h1>
 
+        <form className="search" onSubmit={(e) => e.preventDefault()}>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => { setQuery(e.target.value); setSelected(null); setNearby(null) }}
+            placeholder="먹고 싶은 음식 검색 (예: 국밥, 고기, 회)"
+            aria-label="음식 검색"
+          />
+        </form>
+        <div className="chips">
+          {QUICK_FOODS.map((f) => (
+            <button
+              key={f}
+              className={query === f ? 'on' : ''}
+              onClick={() => { setQuery(query === f ? '' : f); setSelected(null); setNearby(null) }}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+
         <div className="legend">
           <span><i className="dot" style={{ background: COLORS.restaurant }} />안심식당</span>
           <span><i className="dot" style={{ background: COLORS.freeParking }} />무료주차 근처</span>
@@ -218,8 +271,40 @@ function App() {
         )}
         {error && <p className="error">{error}</p>}
 
-        {!selected ? (
-          <p className="hint">지도에서 안심식당을 누르면 상세정보와 주변 주차장을 알려드려요.</p>
+        {!selected && terms.length > 0 ? (
+          <section className="detail">
+            <p className="note">
+              <b>'{query.trim()}'</b> 검색 결과 <b>{shown.length.toLocaleString()}곳</b>
+              {terms.length > 1 && <> · 함께 찾은 단어: {terms.slice(1).join(', ')}</>}
+              <br />
+              식당 이름과 등록된 메뉴로 찾은 결과예요. (공공데이터에 전체 메뉴 정보는 없음)
+            </p>
+            {shown.length === 0 ? (
+              <p className="hint">일치하는 식당이 없어요. 다른 음식 이름으로 검색해 보세요.</p>
+            ) : (
+              <ul className="list">
+                {shown.slice(0, 200).map((r) => {
+                  const hit = matches.get(r.id)
+                  return (
+                    <li key={r.id} onClick={() => selectRestaurant(r)}>
+                      <div className="row">
+                        <strong>{r.name}</strong>
+                        <span className="tag">{hit.inMenu ? `메뉴: ${hit.term}` : hit.term}</span>
+                      </div>
+                      <div className="sub">
+                        {r.district} · {r.address.replace(/^대구광역시\s*/, '')}
+                        {r.menu && <> · {r.menu}</>}
+                        {r.freeParkingCount > 0 && <span className="good"> · 🅿 무료주차</span>}
+                      </div>
+                    </li>
+                  )
+                })}
+                {shown.length > 200 && <li className="sub">… 외 {shown.length - 200}곳 (구·군을 선택해 좁혀 보세요)</li>}
+              </ul>
+            )}
+          </section>
+        ) : !selected ? (
+          <p className="hint">먹고 싶은 음식을 검색하거나, 지도에서 안심식당을 누르면 상세정보와 주변 주차장을 알려드려요.</p>
         ) : (
           <section className="detail">
             <div className="detail-head">
@@ -239,6 +324,11 @@ function App() {
               </button>
             </div>
 
+            {terms.length > 0 && (
+              <button className="back" onClick={() => { setSelected(null); setNearby(null) }}>
+                ← '{query.trim()}' 검색 결과로
+              </button>
+            )}
             <div className="facts">
               {selected.dalseo && (
                 <div>
