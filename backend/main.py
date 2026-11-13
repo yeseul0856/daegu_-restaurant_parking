@@ -325,6 +325,8 @@ async def parking_nearby(
 # ---------------------------------------------------------------- 달서구 음식점 현황 매칭
 DALSEO_PATH = "/3071544/v1/uddi:1c67b132-c9c8-4427-929e-e35429f9d1ba"  # 2026-10-29 (최신)
 DALSEO_MENU_PATH = "/3071544/v1/uddi:6c7f534d-ab9b-47fe-b5a1-df0ff871baf5"  # 2025-05-27 (식단 항목 있음)
+# 대구광역시 음식점 등록현황 (업태 = 음식 종류). 안심식당 중 여기에 등록된 식당만 표시
+REGISTRY_PATH = "/3056779/v1/uddi:bcc5c406-a4d9-4762-b0cd-f80c311c2a88"  # 2025-05-23 (최신)
 FREE_PARKING_RADIUS = 200  # 이 반경(m) 안에 무료 주차장이 있으면 "무료주차 근처"로 표시
 GRID = 0.005  # 무료 주차장 격자 크기(도) ≈ 450~550m, FREE_PARKING_RADIUS 보다 커야 함
 
@@ -358,12 +360,25 @@ def find_shop(index: dict[str, list[dict]], name: str, addr: str) -> dict | None
     return None
 
 
-def index_by_road(rows: list[dict]) -> dict[str, list[dict]]:
+def index_by_road(rows: list[dict], field: str = "소재지(도로명)") -> dict[str, list[dict]]:
     index: dict[str, list[dict]] = {}
     for d in rows:
-        key = road_key(d.get("소재지(도로명)"))
+        key = road_key(d.get(field))
         if key:
             index.setdefault(key, []).append(d)
+    return index
+
+
+_index_cache: dict[str, tuple[int, dict]] = {}
+
+
+def cached_index(path: str, rows: list[dict], field: str) -> dict[str, list[dict]]:
+    """3만 건 주소 인덱스를 요청마다 다시 만들지 않도록, 원본 데이터가 바뀔 때만 재생성."""
+    cached = _index_cache.get(path)
+    if cached and cached[0] == id(rows):
+        return cached[1]
+    index = index_by_road(rows, field)
+    _index_cache[path] = (id(rows), index)
     return index
 
 
@@ -394,16 +409,18 @@ def free_parking_near(grid: dict, lat: float, lng: float) -> list[dict]:
 # ---------------------------------------------------------------- 안심식당
 @app.get("/api/restaurants")
 async def restaurants():
-    """대구 전체 안심식당.
+    """대구 안심식당 중 '대구광역시 음식점 등록현황'에도 있는 식당.
 
+    - 등록현황의 업태(한식, 중국식, 일식, 회집 ...)를 음식 종류로 덧붙임
     - 달서구 음식점 현황과 일치하는 식당은 행정동/업종/메뉴/정확한 좌표를 덧붙임
     - 모든 식당에 반경 FREE_PARKING_RADIUS 안의 무료 주차장 정보를 덧붙임
     """
     global _geocode_task
-    rows, dalseo_rows, menu_rows, parks = await asyncio.gather(
+    rows, dalseo_rows, menu_rows, registry_rows, parks = await asyncio.gather(
         fetch_all(RESTAURANT_PATH),
         fetch_all(DALSEO_PATH),
         fetch_all(DALSEO_MENU_PATH),
+        fetch_all(REGISTRY_PATH),
         parking_items(),
     )
 
@@ -416,17 +433,27 @@ async def restaurants():
         if not cooling and not (key and key == _failed_key) and pending_addresses(restaurant_addresses(rows), provider):
             _geocode_task = asyncio.create_task(geocode_restaurants(rows))
 
+    registry_index = cached_index(REGISTRY_PATH, registry_rows, "업소주소")
     dalseo_index = index_by_road(dalseo_rows)
     menu_index = index_by_road([r for r in menu_rows if (r.get("식단") or "").strip()])
     free_grid = build_grid([p for p in parks if "무료" in (p.get("fee") or "")])
 
     result = []
-    safe_in_dalseo = matched = 0
+    safe_in_dalseo = matched = registered = 0
+    food_types: dict[str, int] = {}
     for r in rows:
         addr = r.get("주소1")
         if not addr:
             continue
         name = r.get("안심식당명")
+
+        # 음식점 등록현황에 없는 식당은 제외
+        reg = find_shop(registry_index, name, addr)
+        if not reg:
+            continue
+        registered += 1
+        food_type = reg.get("업태") or "기타"
+
         item = {
             "id": r.get("연번"),
             "name": name,
@@ -435,6 +462,8 @@ async def restaurants():
             "designated": r.get("지정일"),
             "district": next((g for g in addr.split() if g.endswith(("구", "군"))), None),
             "dalseo": False,
+            "foodType": food_type,  # 업태 (음식 종류)
+            "registryName": reg.get("업소명"),
         }
 
         coord = lookup_coord(clean_address(addr))
@@ -465,10 +494,14 @@ async def restaurants():
             "freeParkingCount": len(near),
         })
         result.append(item)
+        food_types[food_type] = food_types.get(food_type, 0) + 1
 
     return {
         "count": len(result),
         "total": len(rows),
+        "registryMatched": registered,  # 안심식당 중 음식점 등록현황과 겹치는 식당 수
+        "registryTotal": len(registry_rows),
+        "foodTypes": dict(sorted(food_types.items(), key=lambda kv: -kv[1])),
         "safeInDalseo": safe_in_dalseo,
         "dalseoMatched": matched,
         "freeParkingRadius": FREE_PARKING_RADIUS,

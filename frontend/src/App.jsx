@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { MapContainer, TileLayer, CircleMarker, Circle, Popup, Tooltip, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
-import { QUICK_FOODS, matchFood, searchTerms } from './foodSearch'
+import { foodTypeLabel, matchFood, searchTerms, searchTypes } from './foodSearch'
 
 const DAEGU_CENTER = [35.8714, 128.6014]
 const RADIUS_OPTIONS = [300, 500, 1000]
@@ -45,6 +45,7 @@ function App() {
   const [data, setData] = useState(null)
   const [district, setDistrict] = useState('')
   const [query, setQuery] = useState('')
+  const [foodType, setFoodType] = useState('') // 업태 (음식 종류)
   const [onlyFreeParking, setOnlyFreeParking] = useState(false)
   const [selected, setSelected] = useState(null)
   const [radius, setRadius] = useState(500)
@@ -79,21 +80,22 @@ function App() {
       .catch((e) => setError(String(e)))
   }, [selected, radius])
 
-  const items = data?.items ?? []
+  const items = useMemo(() => data?.items ?? [], [data])
   const districts = useMemo(
     () => [...new Set(items.map((r) => r.district).filter(Boolean))].sort(),
     [items],
   )
   // 음식 검색 (식당 이름 + 등록 메뉴)
   const terms = useMemo(() => searchTerms(query), [query])
+  const types = useMemo(() => searchTypes(query), [query])
   const matches = useMemo(() => {
     const m = new Map()
     if (terms.length) for (const r of items) {
-      const hit = matchFood(r, terms)
+      const hit = matchFood(r, terms, types)
       if (hit) m.set(r.id, hit)
     }
     return m
-  }, [items, terms])
+  }, [items, terms, types])
 
   const shown = useMemo(
     () =>
@@ -101,11 +103,29 @@ function App() {
         (r) =>
           (!district || r.district === district) &&
           (!onlyFreeParking || r.freeParkingCount > 0) &&
+          (!foodType || r.foodType === foodType) &&
           (!terms.length || matches.has(r.id)),
       ),
-    [items, district, onlyFreeParking, terms, matches],
+    [items, district, onlyFreeParking, foodType, terms, matches],
   )
-  const fitKey = terms.length ? `${query}|${district}|${onlyFreeParking}|${shown.length}` : ''
+  const searching = terms.length > 0 || foodType !== ''
+  const fitKey = searching ? `${query}|${foodType}|${district}|${onlyFreeParking}|${shown.length}` : ''
+
+  // 업태별 식당 수 (구·군 / 무료주차 필터 반영)
+  const typeCounts = useMemo(() => {
+    const c = {}
+    for (const r of items) {
+      if (district && r.district !== district) continue
+      if (onlyFreeParking && r.freeParkingCount === 0) continue
+      c[r.foodType] = (c[r.foodType] ?? 0) + 1
+    }
+    return Object.entries(c).sort((a, b) => b[1] - a[1])
+  }, [items, district, onlyFreeParking])
+
+  const clearSelection = () => {
+    setSelected(null)
+    setNearby(null)
+  }
   const fitPoints = useMemo(() => shown.map((r) => [r.lat, r.lng]), [shown])
   const freeCount = useMemo(
     () => items.filter((r) => (!district || r.district === district) && r.freeParkingCount > 0).length,
@@ -150,7 +170,7 @@ function App() {
               eventHandlers={{ click: () => selectRestaurant(r) }}
             >
               <Tooltip direction="top" offset={[0, -6]}>
-                🍽 {r.name}
+                🍽 {r.name} · {foodTypeLabel(r.foodType)}
                 {r.menu && ` · ${r.menu}`}
                 {r.freeParkingCount > 0 && ' · 🅿 무료주차 근처'}
               </Tooltip>
@@ -212,14 +232,18 @@ function App() {
             aria-label="음식 검색"
           />
         </form>
-        <div className="chips">
-          {QUICK_FOODS.map((f) => (
+        <div className="chips" aria-label="음식 종류">
+          <button className={foodType === '' ? 'on' : ''} onClick={() => { setFoodType(''); clearSelection() }}>
+            전체 종류
+          </button>
+          {typeCounts.map(([t, n]) => (
             <button
-              key={f}
-              className={query === f ? 'on' : ''}
-              onClick={() => { setQuery(query === f ? '' : f); setSelected(null); setNearby(null) }}
+              key={t}
+              className={foodType === t ? 'on' : ''}
+              onClick={() => { setFoodType(foodType === t ? '' : t); clearSelection() }}
+              title={t}
             >
-              {f}
+              {foodTypeLabel(t)} <span className="count">{n}</span>
             </button>
           ))}
         </div>
@@ -246,7 +270,9 @@ function App() {
               </label>
             </div>
             <p className="note">
-              안심식당 <b>{shown.length.toLocaleString()}곳</b> 표시 (전체 {data.total.toLocaleString()}곳)
+              안심식당 <b>{shown.length.toLocaleString()}곳</b> 표시
+              <br />
+              안심식당 {data.total.toLocaleString()}곳 중 대구 음식점 등록현황과 일치하는 {data.registryMatched.toLocaleString()}곳
               {(!district || district === '달서구') && (
                 <>
                   <br />
@@ -271,13 +297,16 @@ function App() {
         )}
         {error && <p className="error">{error}</p>}
 
-        {!selected && terms.length > 0 ? (
+        {!selected && searching ? (
           <section className="detail">
             <p className="note">
-              <b>'{query.trim()}'</b> 검색 결과 <b>{shown.length.toLocaleString()}곳</b>
+              {terms.length > 0 && <><b>'{query.trim()}'</b> </>}
+              {foodType && <><b>[{foodTypeLabel(foodType)}]</b> </>}
+              결과 <b>{shown.length.toLocaleString()}곳</b>
               {terms.length > 1 && <> · 함께 찾은 단어: {terms.slice(1).join(', ')}</>}
+              {types.length > 0 && <> · 음식 종류: {types.map(foodTypeLabel).join(', ')}</>}
               <br />
-              식당 이름과 등록된 메뉴로 찾은 결과예요. (공공데이터에 전체 메뉴 정보는 없음)
+              식당 이름·등록 메뉴·업태(음식 종류)로 찾은 결과예요.
             </p>
             {shown.length === 0 ? (
               <p className="hint">일치하는 식당이 없어요. 다른 음식 이름으로 검색해 보세요.</p>
@@ -289,7 +318,9 @@ function App() {
                     <li key={r.id} onClick={() => selectRestaurant(r)}>
                       <div className="row">
                         <strong>{r.name}</strong>
-                        <span className="tag">{hit.inMenu ? `메뉴: ${hit.term}` : hit.term}</span>
+                        <span className="tag">
+                          {hit && !hit.byType ? (hit.inMenu ? `메뉴: ${hit.term}` : hit.term) : foodTypeLabel(r.foodType)}
+                        </span>
                       </div>
                       <div className="sub">
                         {r.district} · {r.address.replace(/^대구광역시\s*/, '')}
@@ -324,12 +355,19 @@ function App() {
               </button>
             </div>
 
-            {terms.length > 0 && (
-              <button className="back" onClick={() => { setSelected(null); setNearby(null) }}>
-                ← '{query.trim()}' 검색 결과로
+            {searching && (
+              <button className="back" onClick={clearSelection}>
+                ← 검색 결과로
               </button>
             )}
             <div className="facts">
+              <div>
+                <span className="label">음식 종류</span>
+                <span className="tag">{foodTypeLabel(selected.foodType)}</span>
+                {selected.registryName && selected.registryName !== selected.name && (
+                  <span className="sub"> · 등록 상호: {selected.registryName}</span>
+                )}
+              </div>
               {selected.dalseo && (
                 <div>
                   <span className="label">메뉴</span>

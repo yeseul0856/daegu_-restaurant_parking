@@ -307,3 +307,13 @@
   padding: 0;
   font-size: 13px;
 }
+
+.chips .count {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.chips {
+  max-height: 84px;
+  overflow-y: auto;
+}

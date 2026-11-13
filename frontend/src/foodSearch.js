@@ -46,9 +46,48 @@ const EXCLUDES = {
   빵: ['점빵'], // "가게"라는 뜻의 사투리
 }
 
-// 바로 누를 수 있는 추천 검색어
-export const QUICK_FOODS = ['국밥', '고기', '회', '치킨', '중식', '국수', '찜', '분식', '돈까스', '카페']
+// ---------------------------------------------------------------- 업태 (음식 종류)
+// 대구광역시 음식점 등록현황의 '업태' 값 -> 화면에 보여줄 이름
+export const FOOD_TYPE_LABELS = {
+  한식: '한식',
+  '식육(숯불구이)': '고기·숯불구이',
+  '호프/통닭': '치킨·호프',
+  경양식: '경양식·돈까스',
+  일식: '일식',
+  회집: '횟집',
+  중국식: '중식',
+  분식: '분식',
+  '김밥(도시락)': '김밥·도시락',
+  '정종/대포집/소주방': '주점',
+  '탕류(보신용)': '보신탕류',
+  복어취급: '복어',
+  '외국음식전문점(인도,태국등)': '외국음식',
+  냉면집: '냉면',
+  뷔페식: '뷔페',
+  기타: '기타',
+}
+export const foodTypeLabel = (t) => FOOD_TYPE_LABELS[t] ?? t
 
+// 검색어 -> 해당하는 업태 (예: "짬뽕" 검색 시 업태가 '중국식'인 식당도 찾음)
+const TYPE_KEYWORDS = {
+  '식육(숯불구이)': ['고기', '숯불', '구이', '갈비', '삼겹살', '삼겹', '막창', '곱창', '대창', '한우', '소고기', '돼지고기', '뭉티기', '육회'],
+  '호프/통닭': ['치킨', '닭', '통닭', '호프', '맥주', '치맥'],
+  경양식: ['양식', '경양식', '돈까스', '돈가스', '파스타', '피자', '스테이크', '버거', '햄버거', '오므라이스'],
+  일식: ['일식', '초밥', '스시', '라멘', '우동', '소바', '오마카세', '돈부리'],
+  회집: ['회', '횟집', '해산물', '물회', '생선회', '대게'],
+  중국식: ['중식', '중국집', '중국', '짜장', '짜장면', '짬뽕', '탕수육', '마라', '마라탕', '양꼬치'],
+  분식: ['분식', '떡볶이', '라면', '순대'],
+  '김밥(도시락)': ['김밥', '도시락', '분식'],
+  '정종/대포집/소주방': ['술집', '주점', '소주', '포차', '포장마차', '이자카야', '안주'],
+  '탕류(보신용)': ['보신탕', '삼계탕', '염소', '흑염소', '보양식'],
+  복어취급: ['복어', '복국', '복지리', '회'],
+  '외국음식전문점(인도,태국등)': ['외국음식', '인도', '커리', '카레', '태국', '베트남', '쌀국수', '멕시코', '타코'],
+  냉면집: ['냉면', '밀면', '면'],
+  뷔페식: ['뷔페'],
+  한식: ['한식', '백반', '한정식', '밥집'],
+}
+
+// ---------------------------------------------------------------- 검색
 const normalize = (s) => (s || '').replace(/\s+/g, '').toLowerCase()
 
 export function searchTerms(query) {
@@ -57,16 +96,30 @@ export function searchTerms(query) {
   return [...new Set([q, ...(SYNONYMS[q] ?? [])])]
 }
 
-// 식당이 검색어와 일치하면 일치한 단어를, 아니면 null 을 반환
-export function matchFood(restaurant, terms) {
-  if (!terms.length) return null
-  const fields = [restaurant.name, restaurant.dalseoName, restaurant.menu]
+// 검색어에 해당하는 업태 목록
+export function searchTypes(query) {
+  const q = normalize(query)
+  if (!q) return []
+  return Object.entries(TYPE_KEYWORDS)
+    .filter(([type, words]) => words.includes(q) || normalize(foodTypeLabel(type)).includes(q))
+    .map(([type]) => type)
+}
+
+// 식당이 검색어와 일치하면 { term, inMenu, byType } 를, 아니면 null 을 반환
+//   1) 식당 이름 / 등록 메뉴에 음식명이 있으면 우선
+//   2) 없으면 업태(음식 종류)로 일치
+export function matchFood(restaurant, terms, types = []) {
+  if (!terms.length && !types.length) return null
+  const fields = [restaurant.name, restaurant.dalseoName, restaurant.registryName, restaurant.menu]
   for (const term of terms) {
     for (const field of fields) {
       let text = normalize(field)
       for (const ex of EXCLUDES[term] ?? []) text = text.replaceAll(ex, '')
-      if (text.includes(term)) return { term, inMenu: field === restaurant.menu }
+      if (text.includes(term)) return { term, inMenu: field === restaurant.menu, byType: false }
     }
+  }
+  if (types.includes(restaurant.foodType)) {
+    return { term: foodTypeLabel(restaurant.foodType), inMenu: false, byType: true }
   }
   return null
 }
